@@ -1,21 +1,41 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { optimizeResumeWithGemini } from "@/lib/gemini";
-import { checkRateLimit } from "@/lib/ratelimit";
-import { sanitizeRawText, assertServerEnvironment } from "@/lib/security/sanitizer";
+import {
+  AiServiceUnavailableError,
+  isGeminiApiKeyConfigured,
+  optimizeResumeWithGemini,
+} from "@/lib/gemini";
+import { checkRateLimitAsync } from "@/lib/ratelimit";
+import {
+  sanitizeRawText,
+  assertServerEnvironment,
+} from "@/lib/security/sanitizer";
 import { validateRequestOrigin } from "@/lib/security/request";
+import { AtsPlatformSchema, TargetLanguageSchema } from "@/types/resume";
 
 assertServerEnvironment();
 
 const RequestSchema = z.object({
   resumeText: z
     .string()
-    .min(50, "O currículo precisa ter pelo menos 50 caracteres para uma análise consistente.")
-    .max(30000, "O texto do currículo excede o limite máximo permitido (30.000 caracteres)."),
+    .min(
+      50,
+      "O currículo precisa ter pelo menos 50 caracteres para uma análise consistente."
+    )
+    .max(
+      30000,
+      "O texto do currículo excede o limite máximo permitido (30.000 caracteres)."
+    ),
   jobDescription: z
     .string()
     .min(30, "A descrição da vaga precisa ter pelo menos 30 caracteres.")
-    .max(20000, "A descrição da vaga excede o limite permitido (20.000 caracteres)."),
+    .max(
+      20000,
+      "A descrição da vaga excede o limite permitido (20.000 caracteres)."
+    ),
+  atsPlatform: AtsPlatformSchema.optional().default("general"),
+  targetLanguage: TargetLanguageSchema.optional().default("auto"),
+  forceDemo: z.boolean().optional().default(false),
 });
 
 const SECURITY_HEADERS = {
@@ -36,13 +56,13 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 2. Identificação de IP para Rate Limiting
+    // 2. Identificação de IP para Rate Limiting (Upstash Redis REST ou Memória Segura)
     const ip =
       req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
       req.headers.get("x-real-ip") ||
       "127.0.0.1";
 
-    const rateLimit = checkRateLimit(ip, 12, 60); // 12 requisições por minuto por IP
+    const rateLimit = await checkRateLimitAsync(ip, 12, 60, "astracv_optimize");
     if (!rateLimit.allowed) {
       return NextResponse.json(
         {
@@ -66,18 +86,24 @@ export async function POST(req: NextRequest) {
     const validation = RequestSchema.safeParse(body);
     if (!validation.success) {
       const errorMsg = validation.error.issues.map((i) => i.message).join(", ");
-      return NextResponse.json({ error: errorMsg }, { status: 400, headers: SECURITY_HEADERS });
+      return NextResponse.json(
+        { error: errorMsg },
+        { status: 400, headers: SECURITY_HEADERS }
+      );
     }
 
     // 4. Sanitização profunda de entradas (Anti-Injection & Bidi Attacks)
     const cleanResume = sanitizeRawText(validation.data.resumeText, 30000);
     const cleanJob = sanitizeRawText(validation.data.jobDescription, 20000);
+    const { atsPlatform, targetLanguage, forceDemo } = validation.data;
 
-    // 5. Execução no motor seguro
-    const result = await optimizeResumeWithGemini(cleanResume, cleanJob);
-    const isDemo =
-      !process.env.GEMINI_API_KEY ||
-      process.env.GEMINI_API_KEY === "your_gemini_api_key_here";
+    // 5. Execução no motor híbrido (IA + Scorer Determinístico)
+    const isDemo = forceDemo || !isGeminiApiKeyConfigured();
+    const result = await optimizeResumeWithGemini(cleanResume, cleanJob, {
+      atsPlatform,
+      targetLanguage,
+      forceDemo: isDemo,
+    });
 
     return NextResponse.json(
       {
@@ -89,11 +115,27 @@ export async function POST(req: NextRequest) {
       { headers: SECURITY_HEADERS }
     );
   } catch (error: unknown) {
-    // Escudo de Segurança: Logs seguros no servidor, sem jamais vazar detalhes internos ao cliente
-    console.error("Falha protegida na rota /api/optimize:", error instanceof Error ? error.message : "Erro desconhecido");
+    if (error instanceof AiServiceUnavailableError) {
+      return NextResponse.json(
+        {
+          error: error.message,
+          code: "AI_SERVICE_UNAVAILABLE",
+          canFallbackToDemo: true,
+        },
+        { status: 503, headers: SECURITY_HEADERS }
+      );
+    }
+
+    console.error(
+      "Falha protegida na rota /api/optimize:",
+      error instanceof Error ? error.message : "Erro desconhecido"
+    );
 
     return NextResponse.json(
-      { error: "Falha ao processar a calibragem com segurança. Por favor, tente novamente em instantes." },
+      {
+        error:
+          "Falha ao processar a calibragem com segurança. Por favor, tente novamente em instantes.",
+      },
       { status: 500, headers: SECURITY_HEADERS }
     );
   }

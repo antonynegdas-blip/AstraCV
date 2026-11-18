@@ -41,12 +41,16 @@ export function sanitizeRawText(input: string, maxLength: number = 30000): strin
  */
 function defangPromptInjection(text: string): string {
   const injectionPatterns = [
-    /ignore\s+(all\s+)?(previous|prior)\s+instructions/gi,
-    /disregard\s+(all\s+)?(previous|prior)\s+instructions/gi,
-    /forget\s+(all\s+)?(previous|prior)\s+rules/gi,
+    /ignore\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?|rules?)/gi,
+    /disregard\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?)/gi,
+    /forget\s+(all\s+)?(previous|prior|above)\s+(rules?|instructions?)/gi,
+    /ignore\s+(todas\s+)?as\s+instru[cç][oõ]es\s+anteriores/gi,
+    /desconsidere\s+(todas\s+)?as\s+instru[cç][oõ]es/gi,
     /system\s*prompt\s*:/gi,
     /you\s+are\s+now\s+(in\s+)?(dan|developer\s+mode)/gi,
     /override\s+(system|developer)\s+instructions/gi,
+    /<\/?system>/gi,
+    /\[INST\]|\[\/INST\]/gi,
   ];
 
   let safeText = text;
